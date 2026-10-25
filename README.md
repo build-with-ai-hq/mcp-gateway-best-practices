@@ -1,3 +1,5 @@
+<img src="assets/banner.png" alt="mcp-gateway-best-practices: Run MCP servers safely and efficiently, at team scale." width="100%">
+
 # mcp-gateway-best-practices
 
 [![skills.sh](https://skills.sh/b/build-with-ai-hq/mcp-gateway-best-practices)](https://skills.sh/build-with-ai-hq/mcp-gateway-best-practices)
