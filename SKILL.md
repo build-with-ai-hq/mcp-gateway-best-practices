@@ -42,7 +42,7 @@ Count distinct servers and how many places each one is configured. The same serv
 **2. Find credentials in MCP config.**
 
 ```bash
-grep -rInE '(token|secret|api[_-]?key|password|authorization)"?\s*[:=]' \
+grep -rIinE '(token|secret|api[_-]?key|password|authorization)"?\s*[:=]' \
   .mcp.json .cursor/mcp.json .vscode/mcp.json ~/.claude.json ~/.cursor/mcp.json 2>/dev/null \
   | grep -vE '\$\{|env\.|<' | head -50
 git ls-files | grep -E '(^|/)(\.mcp\.json|mcp\.json)$'
