@@ -88,6 +88,59 @@ config.json (keys live under `governance.virtual_keys`; `value` can reference an
 
 A disabled MCP server stays unavailable even if a key grants it. Keys can carry an expiry; expired keys fail closed for both inference and tool calls.
 
+## Approval gate code (Python and TypeScript)
+
+Python approval gate around an explicit-execution loop (works with any OpenAI-compatible endpoint that returns `tool_calls`; shown against a Bifrost gateway):
+
+```python
+import json, httpx
+
+BASE = "http://localhost:8080"
+HEADERS = {"Authorization": "Bearer sk-bf-your-virtual-key"}
+AUTO_OK = {"crm_search_contacts", "crm_get_contact"}  # exact names as returned; read-only only
+
+def run_turn(messages, model="openai/gpt-4o-mini"):  # use the model the project already uses
+    r = httpx.post(f"{BASE}/v1/chat/completions", headers=HEADERS,
+                   json={"model": model, "messages": messages}, timeout=120).json()
+    msg = r["choices"][0]["message"]
+    messages.append(msg)
+    for call in msg.get("tool_calls") or []:
+        name, args = call["function"]["name"], call["function"]["arguments"]
+        if name not in AUTO_OK and not ask_human(f"Run {name} with {args}?"):
+            messages.append({"role": "tool", "tool_call_id": call["id"],
+                             "content": "Denied by user. Do not retry this call."})
+            continue
+        result = httpx.post(f"{BASE}/v1/mcp/tool/execute", headers=HEADERS, json=call, timeout=60).json()
+        messages.append(result)  # {"role": "tool", "content": ..., "tool_call_id": ...}
+    return messages
+```
+
+TypeScript equivalent:
+
+```ts
+const BASE = "http://localhost:8080";
+const headers = { Authorization: "Bearer sk-bf-your-virtual-key", "Content-Type": "application/json" };
+const AUTO_OK = new Set(["crm_search_contacts", "crm_get_contact"]); // exact names as returned
+
+export async function runTurn(messages: any[], model = "openai/gpt-4o-mini") {
+  const res = await fetch(`${BASE}/v1/chat/completions`, { method: "POST", headers, body: JSON.stringify({ model, messages }) });
+  const msg = (await res.json()).choices[0].message;
+  messages.push(msg);
+  for (const call of msg.tool_calls ?? []) {
+    const { name, arguments: args } = call.function;
+    if (!AUTO_OK.has(name) && !(await askHuman(`Run ${name} with ${args}?`))) {
+      messages.push({ role: "tool", tool_call_id: call.id, content: "Denied by user. Do not retry this call." });
+      continue;
+    }
+    const exec = await fetch(`${BASE}/v1/mcp/tool/execute`, { method: "POST", headers, body: JSON.stringify(call) });
+    messages.push(await exec.json());
+  }
+  return messages;
+}
+```
+
+Use the exact tool names the endpoint returns (log one response first); gateways prefix tool names with the server name. Keep `AUTO_OK` in config, reviewed like code.
+
 ## Bifrost: approvals and agent mode
 
 - **Default (explicit execution)**: on the LLM path (`/v1/chat/completions` etc.), Bifrost returns tool calls as suggestions. Your app reviews them and calls `POST /v1/mcp/tool/execute`. Put the approval gate there.

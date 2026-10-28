@@ -145,7 +145,7 @@ When your app sends chat requests through Bifrost (`/v1/chat/completions`, `/ope
 
 ## 4. Health, states and recovery
 
-- Health check: MCP `ping` when `is_ping_available` is true, otherwise `tools/list`. Once healthy, checks run on the tool sync interval (default 10 minutes, `tool_sync_interval` per client or `mcp.tool_sync_interval` globally, Go duration strings like `"10m"`); while `unstable` they run every 10 seconds.
+- Health check: a `tools/list` over the client's connection, preceded by a `ping` only when `is_ping_available` is true. Set `is_ping_available: false` for servers on the 2026-07-28 MCP revision, which removed `ping`. Once healthy, checks run on the tool sync interval (default 10 minutes, `tool_sync_interval` per client or `mcp.tool_sync_interval` globally, Go duration strings like `"10m"`); while `unstable` they run every 10 seconds.
 - States: `healthy`, `unstable` (last check failed; tool calls still attempted), `needs_reauth` (credential dead, admin must reauthorize), `pending_verification`, `disabled`, `error`, `degraded` (cluster disagreement).
 - `GET /api/mcp/clients` includes `last_failure` (`stage`, `message`, `at`, `since`) for unhealthy servers. Start debugging there.
 - HTTP and SSE reconnect make-before-break; stdio reconnects close-first (a brief gap) to avoid two subprocesses fighting over locks or ports.
@@ -174,3 +174,23 @@ histogram_quantile(0.95, sum by (le, mcp_tool_name) (rate(bifrost_mcp_client_ope
 | Tools changed upstream but not in Bifrost | `POST /api/mcp/client/{id}/refresh-tools` |
 | Tool calls time out | Raise `tool_execution_timeout` on that client; make the tool paginate |
 | Model sees each tool twice | Turn on `disable_auto_tool_inject` |
+
+## 7. Verify the setup
+
+```bash
+# 1. Servers are connected and healthy
+curl -s http://localhost:8080/api/mcp/clients | jq '.[] | {name: .config.name, state, tools: (.tools|length)}'
+
+# 2. A scoped key sees only its granted tools
+curl -s -X POST http://localhost:8080/mcp -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer sk-bf-support-key' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '[.result.tools[].name]'
+
+# 3. A tool outside the grant is refused (expect an error, not a result)
+curl -s -X POST http://localhost:8080/mcp -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer sk-bf-support-key' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"<a tool not granted>","arguments":{}}}'
+
+# 4. Tool-call metrics are flowing
+curl -s http://localhost:8080/metrics | grep bifrost_mcp_client_operation_duration_seconds_count
+```

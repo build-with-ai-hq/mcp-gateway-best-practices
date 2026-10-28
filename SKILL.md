@@ -158,56 +158,7 @@ def crm_delete_contact(contact_id: str) -> str:
 
 Auto-execute only read-only, idempotent tools. Everything that writes, deletes, sends, pays or deploys goes through an approval step with the exact arguments shown. Enforce it in code, not in the prompt; a prompt instruction is not a control.
 
-Python approval gate around an explicit-execution loop (works with any OpenAI-compatible endpoint that returns `tool_calls`; shown against a Bifrost gateway):
-
-```python
-import json, httpx
-
-BASE = "http://localhost:8080"
-HEADERS = {"Authorization": "Bearer sk-bf-your-virtual-key"}
-AUTO_OK = {"crm_search_contacts", "crm_get_contact"}  # exact names as returned; read-only only
-
-def run_turn(messages, model="openai/gpt-4o-mini"):  # use the model the project already uses
-    r = httpx.post(f"{BASE}/v1/chat/completions", headers=HEADERS,
-                   json={"model": model, "messages": messages}, timeout=120).json()
-    msg = r["choices"][0]["message"]
-    messages.append(msg)
-    for call in msg.get("tool_calls") or []:
-        name, args = call["function"]["name"], call["function"]["arguments"]
-        if name not in AUTO_OK and not ask_human(f"Run {name} with {args}?"):
-            messages.append({"role": "tool", "tool_call_id": call["id"],
-                             "content": "Denied by user. Do not retry this call."})
-            continue
-        result = httpx.post(f"{BASE}/v1/mcp/tool/execute", headers=HEADERS, json=call, timeout=60).json()
-        messages.append(result)  # {"role": "tool", "content": ..., "tool_call_id": ...}
-    return messages
-```
-
-TypeScript equivalent:
-
-```ts
-const BASE = "http://localhost:8080";
-const headers = { Authorization: "Bearer sk-bf-your-virtual-key", "Content-Type": "application/json" };
-const AUTO_OK = new Set(["crm_search_contacts", "crm_get_contact"]); // exact names as returned
-
-export async function runTurn(messages: any[], model = "openai/gpt-4o-mini") {
-  const res = await fetch(`${BASE}/v1/chat/completions`, { method: "POST", headers, body: JSON.stringify({ model, messages }) });
-  const msg = (await res.json()).choices[0].message;
-  messages.push(msg);
-  for (const call of msg.tool_calls ?? []) {
-    const { name, arguments: args } = call.function;
-    if (!AUTO_OK.has(name) && !(await askHuman(`Run ${name} with ${args}?`))) {
-      messages.push({ role: "tool", tool_call_id: call.id, content: "Denied by user. Do not retry this call." });
-      continue;
-    }
-    const exec = await fetch(`${BASE}/v1/mcp/tool/execute`, { method: "POST", headers, body: JSON.stringify(call) });
-    messages.push(await exec.json());
-  }
-  return messages;
-}
-```
-
-Use the exact tool names the endpoint returns (log one response first); gateways prefix tool names with the server name. Keep `AUTO_OK` in config, reviewed like code.
+Pattern: auto-execute an allow-list of exact read-only tool names (`AUTO_OK`, kept in config and reviewed like code), ask a human for everything else, and send a "Denied by user. Do not retry this call." tool result on refusal. Python and TypeScript approval-gate code for an explicit-execution loop is in [references/tool-access-control.md](references/tool-access-control.md#approval-gate-code-python-and-typescript).
 
 ### 6. Treat tool results as untrusted input
 
@@ -238,7 +189,7 @@ Rule of thumb: stdio on a laptop, streamable HTTP for everything shared. A gatew
 ### 9. Make servers reliable
 
 - Set a per-tool-call timeout (30 to 60 seconds for most tools) and return a clear error on timeout rather than hanging the agent loop.
-- Health-check servers (MCP `ping` or `tools/list`) and reconnect automatically; alert when a server returns zero tools.
+- Health-check servers with `tools/list` and reconnect automatically (the 2026-07-28 MCP revision removed `ping`, so do not rely on it); alert when a server returns zero tools.
 - Cap agent loop depth (for example 10 iterations) so a confused model cannot loop forever.
 - Make write tools idempotent where possible (idempotency keys), because retries happen.
 
@@ -306,30 +257,14 @@ What to do at the gateway:
 - **Tool filtering at three levels**: `tools_to_execute` on the server (baseline), `mcp_configs` on the virtual key (ceiling, deny by default), and `x-bf-mcp-include-clients` / `x-bf-mcp-include-tools` request headers (narrow per request, never widen). Details in [references/tool-access-control.md](references/tool-access-control.md).
 - **Approval by default**: Bifrost does not auto-execute tool calls on the LLM path; your app calls `POST /v1/mcp/tool/execute` (practice 5). Agent mode auto-executes only tools listed in `tools_to_auto_execute`, and only when Bifrost runs the LLM loop. When a host like Claude Code connects to `/mcp` (gateway mode), `tools_to_auto_execute` is ignored and approval is the host's job.
 - **Code Mode for 3+ servers**: mark heavy servers `"is_code_mode_client": true` and the model sees four meta-tools instead of every definition. Bifrost's docs report up to 92.8% lower input tokens in their benchmark at about 500 tools across 16 servers. Details in [references/code-mode.md](references/code-mode.md).
-- **Health and recovery**: periodic ping or `tools/list` checks, automatic reconnect, state per server (`healthy`, `unstable`, `needs_reauth`, ...) in `GET /api/mcp/clients`.
+- **Health and recovery**: periodic `tools/list` checks (plus `ping` where a server still supports it), automatic reconnect, state per server (`healthy`, `unstable`, `needs_reauth`, ...) in `GET /api/mcp/clients`.
 - **Observability**: MCP tool calls appear in the built-in logs next to LLM calls; Prometheus exposes `bifrost_mcp_client_operation_duration_seconds` labeled by `mcp_client`, `mcp_tool_name`, `error_type` and virtual key; the OTel plugin emits MCP client spans.
 
 At org scale, Bifrost Enterprise adds Virtual MCPs that bundle tools from several servers into separately addressable endpoints (14-day free trial: https://www.getmaxim.ai/bifrost/enterprise).
 
 ## Verify
 
-```bash
-# 1. Servers are connected and healthy
-curl -s http://localhost:8080/api/mcp/clients | jq '.[] | {name: .config.name, state, tools: (.tools|length)}'
-
-# 2. A scoped key sees only its granted tools
-curl -s -X POST http://localhost:8080/mcp -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer sk-bf-support-key' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '[.result.tools[].name]'
-
-# 3. A tool outside the grant is refused (expect an error, not a result)
-curl -s -X POST http://localhost:8080/mcp -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer sk-bf-support-key' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"<a tool not granted>","arguments":{}}}'
-
-# 4. Tool-call metrics are flowing
-curl -s http://localhost:8080/metrics | grep bifrost_mcp_client_operation_duration_seconds_count
-```
+Run the four checks in [references/bifrost-mcp-setup.md](references/bifrost-mcp-setup.md#7-verify-the-setup): servers healthy with the expected tool counts, a scoped key lists only its granted tools, a tool outside the grant is refused, and MCP tool-call metrics are flowing.
 
 Then confirm in each client (for Claude Code, run `/mcp`) that the gateway is connected with the expected tool count, rerun the selection evals, and compare input tokens per request before and after.
 
